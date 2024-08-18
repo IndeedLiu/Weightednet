@@ -1,0 +1,28 @@
+# 使用Rocker团队提供的R版本控制映像
+FROM rocker/r-ver:4.4.1
+
+# 安装依赖的系统库
+RUN apt-get update && apt-get install -y \
+    libcurl4-openssl-dev \
+    libssl-dev \
+    libxml2-dev \
+    libudunits2-dev \
+    libgdal-dev \
+    libgeos-dev \
+    libproj-dev \
+    libfontconfig1-dev \
+    libcairo2-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# 安装R包
+RUN install2.r --error --deps TRUE \
+    dplyr \
+    tidyr \
+    purrr \
+    WeightIt \
+    data.table \
+    osqp \
+    causaldrf \
+    ks \
+    np
+
