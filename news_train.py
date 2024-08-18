@@ -232,7 +232,7 @@ if __name__ == "__main__":
                         default='dataset/news', help='dir of data matrix')
     parser.add_argument('--save_dir', type=str,
                         default='logs/news/eval', help='dir to save result')
-    parser.add_argument('--n_epochs', type=int, default=400,
+    parser.add_argument('--n_epochs', type=int, default=800,
                         help='num of epochs to train')
     parser.add_argument('--verbose', type=int, default=100,
                         help='print train info freq')
@@ -255,7 +255,7 @@ if __name__ == "__main__":
     t_grid_all = pd.read_csv(os.path.join(args.data_dir, 't_grid.csv')).values
 
     sample_sizes = range(100, 2501, 200)
-    num_iterations = 1
+    num_iterations = 20
     mse_vcnet = []
     mse_vcnet_tr = []
     mse_drnet_tr = []
