@@ -255,7 +255,7 @@ if __name__ == "__main__":
     t_grid_all = pd.read_csv(os.path.join(args.data_dir, 't_grid.csv')).values
 
     sample_sizes = range(50, 501, 100)
-    num_iterations = 1
+    num_iterations = 100
     mse_vcnet = []
     mse_vcnet_tr = []
     mse_drnet_tr = []
