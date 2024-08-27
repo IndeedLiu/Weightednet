@@ -15,6 +15,8 @@ from scipy import sparse
 from models.dynamic_net import Vcnet, TR, Drnet
 from utils.eval import curve
 
+device = torch.device("cuda" if torch.cuda.is_avaliable() else "cpu")
+
 
 class Dataset_from_matrix(Dataset):
     """Dataset created from a tensor data_matrix."""
@@ -232,7 +234,7 @@ if __name__ == "__main__":
                         default='dataset/news', help='dir of data matrix')
     parser.add_argument('--save_dir', type=str,
                         default='logs/news/eval', help='dir to save result')
-    parser.add_argument('--n_epochs', type=int, default=400,
+    parser.add_argument('--n_epochs', type=int, default=1500,
                         help='num of epochs to train')
     parser.add_argument('--verbose', type=int, default=100,
                         help='print train info freq')
@@ -244,9 +246,9 @@ if __name__ == "__main__":
     np.random.seed(seed)
 
     lr_type = 'fixed'
-    wd = 1e-5
-    momentum = 0.8
-    tr_wd = 1e-6
+    wd = 1e-4
+    momentum = 0.9
+    tr_wd = 1e-4
     num_epoch = args.n_epochs
     verbose = args.verbose
 
@@ -254,8 +256,8 @@ if __name__ == "__main__":
         args.data_dir, 'data_matrix.csv')).values
     t_grid_all = pd.read_csv(os.path.join(args.data_dir, 't_grid.csv')).values
 
-    sample_sizes = range(100, 2501, 200)
-    num_iterations = 1
+    sample_sizes = range(100, 2501, 400)
+    num_iterations = 50
     mse_vcnet = []
     mse_vcnet_tr = []
     mse_drnet_tr = []
@@ -289,6 +291,7 @@ if __name__ == "__main__":
 
             models = ['Vcnet', 'Vcnet_TR', 'weightednet',
                       'weightednet_TR', 'Drnet_tr']
+            # models = ['weightednet_TR']
             for model_name in models:
                 if model_name == 'Vcnet' or model_name == 'Vcnet_TR':
                     cfg_density = [(498, 50, 1, 'relu'), (50, 50, 1, 'relu')]
@@ -297,6 +300,7 @@ if __name__ == "__main__":
                     degree = 2
                     knots = [0.33, 0.66]
                     model = Vcnet(cfg_density, num_grid, cfg, degree, knots)
+                    model = model.to(device)
                     model._initialize_weights()
 
                 elif model_name == 'Drnet_tr':
@@ -306,6 +310,7 @@ if __name__ == "__main__":
                     isenhance = 1
                     model = Drnet(cfg_density, num_grid,
                                   cfg, isenhance=isenhance)
+                    model = model.to(device)
                     model._initialize_weights()
 
                 elif model_name == 'weightednet' or model_name == 'weightednet_TR':
@@ -315,6 +320,7 @@ if __name__ == "__main__":
                     degree = 2
                     knots = [0.33, 0.66]
                     model = Vcnet(cfg_density, num_grid, cfg, degree, knots)
+                    model = model.to(device)
                     model._initialize_weights()
                     weights_info = independence_weights(
                         train_matrix[:, 0].numpy(), train_matrix[:, 1:-1].numpy())

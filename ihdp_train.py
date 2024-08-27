@@ -281,7 +281,7 @@ if __name__ == "__main__":
             test_matrix = torch.tensor(
                 data_matrix[test_idx, :], dtype=torch.float32)
             t_grid = torch.tensor(t_grid_all[:, test_idx], dtype=torch.float32)
-            print(t_grid)
+
             train_loader = get_iter(
                 train_matrix, batch_size=len(train_matrix), shuffle=True)
             test_loader = get_iter(
