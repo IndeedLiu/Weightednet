@@ -3,8 +3,7 @@ import numpy as np
 import json
 from data.data import get_iter
 
-
-def curve(model, test_matrix, t_grid, targetreg=None):
+def curve(model, test_matrix, t_grid, targetreg=None, model_name=None):
     n_test = t_grid.shape[1]
     t_grid_hat = torch.zeros(2, n_test)
     t_grid_hat[0, :] = t_grid[0, :]
@@ -44,7 +43,13 @@ def curve(model, test_matrix, t_grid, targetreg=None):
             out = model.forward(t, x)
             tr_out = targetreg(t).data
             g = out[0].data.squeeze()
-            out = out[1].data.squeeze() + tr_out / (g + 1e-6)
+
+            # Check if model_name is 'weightednet_TR' and adjust the out calculation
+            if model_name == 'weightednet_TR':
+                out = out[1].data.squeeze() + tr_out  # Adjusted for weightednet_TR
+            else:
+                out = out[1].data.squeeze() + tr_out / (g + 1e-6)
+
             out = out.mean()
             t_grid_hat[1, _] = out
 
@@ -52,3 +57,4 @@ def curve(model, test_matrix, t_grid, targetreg=None):
         mse = ((t_grid_hat[1, :].squeeze() - t_grid[1, :].squeeze()) ** 2)
         mse = mse[~torch.isnan(mse)].mean().data  # Skip NaN values in MSE
         return t_grid_hat, mse
+
