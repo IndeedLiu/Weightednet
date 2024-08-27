@@ -15,7 +15,7 @@ from scipy import sparse
 from models.dynamic_net import Vcnet, TR, Drnet
 from utils.eval import curve
 
-device = torch.device("cuda" if torch.cuda.is_avaliable() else "cpu")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 class Dataset_from_matrix(Dataset):
