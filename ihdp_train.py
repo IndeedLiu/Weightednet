@@ -255,7 +255,7 @@ if __name__ == "__main__":
     t_grid_all = pd.read_csv(os.path.join(args.data_dir, 't_grid.csv')).values
 
     sample_sizes = range(50, 501, 100)
-    num_iterations = 1
+    num_iterations = 100
     mse_vcnet = []
     mse_vcnet_tr = []
     mse_drnet_tr = []
@@ -281,7 +281,6 @@ if __name__ == "__main__":
             test_matrix = torch.tensor(
                 data_matrix[test_idx, :], dtype=torch.float32)
             t_grid = torch.tensor(t_grid_all[:, test_idx], dtype=torch.float32)
-
             train_loader = get_iter(
                 train_matrix, batch_size=len(train_matrix), shuffle=True)
             test_loader = get_iter(

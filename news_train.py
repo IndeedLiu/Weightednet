@@ -256,8 +256,8 @@ if __name__ == "__main__":
         args.data_dir, 'data_matrix.csv')).values
     t_grid_all = pd.read_csv(os.path.join(args.data_dir, 't_grid.csv')).values
 
-    sample_sizes = range(100, 2501, 400)
-    num_iterations = 50
+    sample_sizes = range(100, 2501, 200)
+    num_iterations = 20
     mse_vcnet = []
     mse_vcnet_tr = []
     mse_drnet_tr = []
