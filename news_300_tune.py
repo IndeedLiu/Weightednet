@@ -1,3 +1,4 @@
+import nni
 import torch
 import math
 import numpy as np
@@ -275,13 +276,25 @@ if __name__ == "__main__":
                         default='dataset/news', help='dir of data matrix')
     parser.add_argument('--save_dir', type=str,
                         default='logs/news/eval', help='dir to save result')
-    parser.add_argument('--n_epochs', type=int, default=400,  # Adjusted to 800
+    parser.add_argument('--n_epochs', type=int, default=600,  # Adjusted to 800
                         help='num of epochs to train')
     parser.add_argument('--verbose', type=int, default=100,
                         help='print train info freq')
 
     args = parser.parse_args()
 
+    new_params = nni.get_next_parameter()
+    params = {"cfg_den_1": 300,
+              "cfg_den_2": 125,
+              "num_grid": 22,
+              "cfg_den_deal": "tanh",
+              "cfg_den_deal_2": "tanh",
+              "cfg_deal": "sigmoid",
+              "cfg_deal_2": "id",
+              "knots1": 0.1,
+              "knots2": 0.65
+              }
+    params.update(new_params)
     seed = 10  # Adjusted seed
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -295,11 +308,14 @@ if __name__ == "__main__":
 
     data_matrix = pd.read_csv(os.path.join(
         args.data_dir, 'data_matrix.csv')).values
-
+    t = data_matrix[:, 0]  # 第一列为 t
+    y = data_matrix[:, -1]  # 最后一列为 y
+    x_300 = data_matrix[:, 1:301]
+    data_matrix = np.column_stack((t, x_300, y))
     t_grid_all = pd.read_csv(os.path.join(args.data_dir, 't_grid.csv')).values
 
     sample_sizes = range(1000, 2001, 1000)
-    num_iterations = 1
+    num_iterations = 10
     mse_vcnet = []
     mse_vcnet_tr = []
     mse_drnet_tr = []
@@ -337,24 +353,28 @@ if __name__ == "__main__":
             test_loader = get_iter(
                 test_matrix, batch_size=len(test_matrix), shuffle=False)
 
-            # models = ['Vcnet', 'Vcnet_TR', 'weightednet',
-            #         'weightednet_TR', 'Drnet_tr']
-            models = ['weightednet_TR']
+            models = ['Vcnet', 'Vcnet_TR', 'weightednet',
+                      'weightednet_TR', 'Drnet_tr']
+            # models = ['weightednet_TR']
             for model_name in models:
                 if model_name == 'Vcnet' or model_name == 'Vcnet_TR':
-                    cfg_density = [(498, 50, 1, 'relu'), (50, 50, 1, 'relu')]
-                    num_grid = 10
-                    cfg = [(50, 50, 1, 'relu'), (50, 1, 1, 'id')]
+                    cfg_density = [(params["cfg_den_1"], params["cfg_den_2"], 1, params["cfg_den_deal"]),
+                                   (params["cfg_den_2"], params["cfg_den_2"], 1, params["cfg_den_deal_2"])]
+                    num_grid = params["num_grid"]
+                    cfg = [(params["cfg_den_2"], params["cfg_den_2"], 1, params["cfg_deal"]),
+                           (params["cfg_den_2"], 1, 1, params["cfg_deal_2"])]
                     degree = 2
-                    knots = [0.33, 0.66]
+                    knots = [params["knots1"], params["knots2"]]
                     model = Vcnet(cfg_density, num_grid, cfg, degree, knots)
                     model = model.to(device)
                     model._initialize_weights()
 
                 elif model_name == 'Drnet_tr':
-                    cfg_density = [(498, 50, 1, 'relu'), (50, 50, 1, 'relu')]
-                    num_grid = 10
-                    cfg = [(50, 50, 1, 'relu'), (50, 1, 1, 'id')]
+                    cfg_density = [(params["cfg_den_1"], params["cfg_den_2"], 1, params["cfg_den_deal"]),
+                                   (params["cfg_den_2"], params["cfg_den_2"], 1, params["cfg_den_deal_2"])]
+                    num_grid = params["num_grid"]
+                    cfg = [(params["cfg_den_2"], params["cfg_den_2"], 1, params["cfg_deal"]),
+                           (params["cfg_den_2"], 1, 1, params["cfg_deal_2"])]
                     isenhance = 1
                     model = Drnet(cfg_density, num_grid,
                                   cfg, isenhance=isenhance)
@@ -362,11 +382,13 @@ if __name__ == "__main__":
                     model._initialize_weights()
 
                 elif model_name == 'weightednet' or model_name == 'weightednet_TR':
-                    cfg_density = [(498, 50, 1, 'relu'), (50, 50, 1, 'relu')]
-                    num_grid = 10
-                    cfg = [(50, 50, 1, 'relu'), (50, 1, 1, 'id')]
+                    cfg_density = [(params["cfg_den_1"], params["cfg_den_2"], 1, params["cfg_den_deal"]),
+                                   (params["cfg_den_2"], params["cfg_den_2"], 1, params["cfg_den_deal_2"])]
+                    num_grid = params["num_grid"]
+                    cfg = [(params["cfg_den_2"], params["cfg_den_2"], 1, params["cfg_deal"]),
+                           (params["cfg_den_2"], 1, 1, params["cfg_deal_2"])]
                     degree = 2
-                    knots = [0.33, 0.66]
+                    knots = [params["knots1"], params["knots2"]]
                     model = Weightednet(
                         cfg_density, num_grid, cfg, degree, knots)
                     model = model.to(device)
@@ -418,23 +440,24 @@ if __name__ == "__main__":
                         x = inputs[:, 1:]  # 取出x
 
                         optimizer.zero_grad()
-
-                        # 前向传播，获取g, Q和hidden_outputs
                         out = model.forward(t, x)
-                        # 解构出 g, Q, hidden_outputs
-                        g, Q, hidden_outputs = out[0], out[1], out[2]
+                        if model_name == 'weightednet' or model_name == 'weightednet_TR':
+                            # 前向传播，获取g, Q和hidden_outputs
 
-                        # 将当前batch的hidden_outputs累加到矩阵中
-                        # 获取最后一层的输出
-                        hidden_outputs_batch = hidden_outputs[-1].detach()
+                            # 解构出 g, Q, hidden_outputs
+                            g, Q, hidden_outputs = out[0], out[1], out[2]
 
-                        if hidden_outputs_matrix is None:
-                            hidden_outputs_matrix = hidden_outputs_batch
-                        else:
-                            hidden_outputs_matrix = torch.cat(
-                                (hidden_outputs_matrix, hidden_outputs_batch), dim=0)
+                            # 将当前batch的hidden_outputs累加到矩阵中
+                            # 获取最后一层的输出
+                            hidden_outputs_batch = hidden_outputs[-1].detach()
 
-                        all_t.append(t)
+                            if hidden_outputs_matrix is None:
+                                hidden_outputs_matrix = hidden_outputs_batch
+                            else:
+                                hidden_outputs_matrix = torch.cat(
+                                    (hidden_outputs_matrix, hidden_outputs_batch), dim=0)
+
+                            all_t.append(t)
 
                         if model_name == 'weightednet' or model_name == 'weightednet_TR':
                             # 不在每次都更新weights，保存所有y训练后的hidden
@@ -442,6 +465,7 @@ if __name__ == "__main__":
 
                         if isTargetReg:
                             trg = TargetReg(t)
+
                             if model_name == 'weightednet_TR':
                                 # 计算 weightednet_TR 的 loss，直接使用 out
                                 loss = weighted_TR(out, trg, y, weights)
@@ -460,7 +484,7 @@ if __name__ == "__main__":
                         loss.backward()
                         optimizer.step()
 
-                    if epoch % 10 == 0:
+                    if epoch % 200 == 0:
                         # 当一个 epoch 所有y都训练完后，使用independence_weights函数更新weights
                         if model_name == 'weightednet' or model_name == 'weightednet_TR':
                             # 将所有t转为numpy，并将hidden_outputs_matrix累加矩阵用于independence_weights计算
@@ -496,19 +520,21 @@ if __name__ == "__main__":
                     mse_weightednet_iter.append(mse)
                 elif model_name == 'weightednet_TR':
                     mse_weightednet_tr_iter.append(mse)
+                    nni.report_intermediate_result(
+                        np.mean(mse.numpy().flatten()))
 
         # Compute IRMSE for each model using the updated mse_iter lists
-        # irmse_vcnet = compute_irmse(mse_vcnet_iter)
-        # irmse_vcnet_tr = compute_irmse(mse_vcnet_tr_iter)
-        # irmse_drnet_tr = compute_irmse(mse_drnet_tr_iter)
-        # irmse_weightednet = compute_irmse(mse_weightednet_iter)
+        irmse_vcnet = compute_irmse(mse_vcnet_iter)
+        irmse_vcnet_tr = compute_irmse(mse_vcnet_tr_iter)
+        irmse_drnet_tr = compute_irmse(mse_drnet_tr_iter)
+        irmse_weightednet = compute_irmse(mse_weightednet_iter)
         irmse_weightednet_tr = compute_irmse(mse_weightednet_tr_iter)
 
         # Append the final IRMSEs for each sample size
-        # mse_vcnet.append(irmse_vcnet)
-        # mse_vcnet_tr.append(irmse_vcnet_tr)
-        # mse_drnet_tr.append(irmse_drnet_tr)
-        # mse_weightednet.append(irmse_weightednet)
+        mse_vcnet.append(irmse_vcnet)
+        mse_vcnet_tr.append(irmse_vcnet_tr)
+        mse_drnet_tr.append(irmse_drnet_tr)
+        mse_weightednet.append(irmse_weightednet)
         mse_weightednet_tr.append(irmse_weightednet_tr)
 
     # Print the final IRMSE results
@@ -517,3 +543,4 @@ if __name__ == "__main__":
     print("Drnet_tr IRMSE:", mse_drnet_tr)
     print("WeightedNet IRMSE:", mse_weightednet)
     print("WeightedNet_TR IRMSE:", mse_weightednet_tr)
+    nni.report_final_result(np.mean(mse_weightednet_tr))

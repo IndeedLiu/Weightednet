@@ -167,6 +167,7 @@ class Vcnet(nn.Module):
         cfg_density: cfg for the density estimator; [(ind1, outd1, isbias1), 'act', ....]; the cfg for density estimator head is not included
         num_grid: how many grid used for the density estimator head
         """
+        torch.manual_seed(10)
 
         # cfg/cfg_density = [(ind1, outd1, isbias1, activation),....]
         self.cfg_density = cfg_density
@@ -229,6 +230,97 @@ class Vcnet(nn.Module):
 
     def _initialize_weights(self):
         # TODO: maybe add more distribution for initialization
+        for m in self.modules():
+            if isinstance(m, Dynamic_FC):
+                m.weight.data.normal_(0, 1.)
+                if m.isbias:
+                    m.bias.data.zero_()
+            elif isinstance(m, nn.Linear):
+                m.weight.data.normal_(0, 0.01)
+                if m.bias is not None:
+                    m.bias.data.zero_()
+            elif isinstance(m, Density_Block):
+                m.weight.data.normal_(0, 0.01)
+                if m.isbias:
+                    m.bias.data.zero_()
+
+
+class Weightednet(nn.Module):
+    def __init__(self, cfg_density, num_grid, cfg, degree, knots):
+        super(Weightednet, self).__init__()
+        """
+        cfg_density: cfg for the density estimator; [(in_features, out_features, isbias, activation), ....]
+        num_grid: how many grids used for the density estimator head
+        """
+        torch.manual_seed(10)
+
+        self.cfg_density = cfg_density
+        self.num_grid = num_grid
+        self.cfg = cfg
+        self.degree = degree
+        self.knots = knots
+
+        # Construct the density estimator
+        density_blocks = []
+        density_hidden_dim = -1
+        for layer_idx, layer_cfg in enumerate(cfg_density):
+            if layer_idx == 0:
+                self.feature_weight = nn.Linear(
+                    in_features=layer_cfg[0], out_features=layer_cfg[1], bias=layer_cfg[2])
+                density_blocks.append(self.feature_weight)
+            else:
+                density_blocks.append(nn.Linear(
+                    in_features=layer_cfg[0], out_features=layer_cfg[1], bias=layer_cfg[2]))
+            density_hidden_dim = layer_cfg[1]
+            if layer_cfg[3] == 'relu':
+                density_blocks.append(nn.ReLU(inplace=True))
+            elif layer_cfg[3] == 'tanh':
+                density_blocks.append(nn.Tanh())
+            elif layer_cfg[3] == 'sigmoid':
+                density_blocks.append(nn.Sigmoid())
+            else:
+                print('No activation')
+
+        # Use ModuleList to allow manual control
+        self.hidden_features = nn.ModuleList(density_blocks)
+
+        self.density_hidden_dim = density_hidden_dim
+        self.density_estimator_head = Density_Block(
+            self.num_grid, density_hidden_dim, isbias=1)
+
+        # Construct the dynamics network
+        blocks = []
+        for layer_idx, layer_cfg in enumerate(cfg):
+            if layer_idx == len(cfg) - 1:  # last layer
+                last_layer = Dynamic_FC(layer_cfg[0], layer_cfg[1], self.degree,
+                                        self.knots, act=layer_cfg[3], isbias=layer_cfg[2], islastlayer=1)
+            else:
+                blocks.append(
+                    Dynamic_FC(layer_cfg[0], layer_cfg[1], self.degree, self.knots, act=layer_cfg[3], isbias=layer_cfg[2], islastlayer=0))
+        blocks.append(last_layer)
+
+        self.Q = nn.Sequential(*blocks)
+
+    def forward(self, t, x):
+        hidden_outputs = []  # List to store hidden features
+
+        # Forward through each layer in hidden_features manually
+        for layer in self.hidden_features:
+            x = layer(x)
+            hidden_outputs.append(x)  # Save the output of each layer
+
+        # Combine t and the last hidden output
+        t_hidden = torch.cat((torch.unsqueeze(t, 1), x), 1)
+
+        # Get g using the density estimator head
+        g = self.density_estimator_head(t, x)
+
+        # Pass through the dynamic network (self.Q)
+        Q = self.Q(t_hidden)
+
+        return g, Q, hidden_outputs  # Return g, Q, and hidden outputs
+
+    def _initialize_weights(self):
         for m in self.modules():
             if isinstance(m, Dynamic_FC):
                 m.weight.data.normal_(0, 1.)
@@ -495,6 +587,7 @@ class Drnet(nn.Module):
         super(Drnet, self).__init__()
 
         # cfg/cfg_density = [(ind1, outd1, isbias1, activation),....]
+        torch.manual_seed(10)
 
         self.cfg_density = cfg_density
         self.num_grid = num_grid

@@ -75,8 +75,10 @@ def criterion_weighted(out, y, weight):
     return ((out[1].squeeze() - y.squeeze()) ** 2 * weight).mean()
 
 
-def weighted_TR(out, trg, y, weight, beta=1., epsilon=1e-5):
-    return beta * ((y.squeeze() - trg.squeeze() * weight - out[1].squeeze()) ** 2).mean()
+# def weighted_TR(out, trg, y, weight, beta=1., epsilon=1e-5):
+#     return beta * ((y.squeeze() - trg.squeeze() * weight - out[1].squeeze()) ** 2).mean()
+def weighted_TR(out, trg, y, weight, den, beta=1., epsilon=1e-5):
+    return ((y.squeeze() - trg.squeeze() * weight / (den+epsilon) - out[1].squeeze()) ** 2).mean()
 
 
 def independence_weights(A, X, lambda_=0, decorrelate_moments=False, preserve_means=False, dimension_adj=True):
@@ -293,7 +295,7 @@ if __name__ == "__main__":
     t_grid_all = pd.read_csv(os.path.join(args.data_dir, 't_grid.csv')).values
 
     sample_sizes = range(1000, 2001, 1000)
-    num_iterations = 20
+    num_iterations = 1
     mse_vcnet = []
     mse_vcnet_tr = []
     mse_drnet_tr = []
@@ -413,8 +415,7 @@ if __name__ == "__main__":
                             out = model.forward(t, x)
                             trg = TargetReg(t)
                             if model_name == 'weightednet_TR':
-                                loss = criterion_weighted(
-                                    out, y, weights) + weighted_TR(out, trg, y, weights)
+                                loss = weighted_TR(out, trg, y, weights)
                             else:
                                 loss = criterion(
                                     out, y, alpha=alpha) + criterion_TR(out, trg, y, beta=beta)
@@ -470,14 +471,14 @@ if __name__ == "__main__":
         # irmse_vcnet = compute_irmse(mse_vcnet_iter)
         # irmse_vcnet_tr = compute_irmse(mse_vcnet_tr_iter)
         # irmse_drnet_tr = compute_irmse(mse_drnet_tr_iter)
-        irmse_weightednet = compute_irmse(mse_weightednet_iter)
+        # irmse_weightednet = compute_irmse(mse_weightednet_iter)
         irmse_weightednet_tr = compute_irmse(mse_weightednet_tr_iter)
 
         # Append the final IRMSEs for each sample size
         # mse_vcnet.append(irmse_vcnet)
         # mse_vcnet_tr.append(irmse_vcnet_tr)
         # mse_drnet_tr.append(irmse_drnet_tr)
-        mse_weightednet.append(irmse_weightednet)
+        # mse_weightednet.append(irmse_weightednet)
         mse_weightednet_tr.append(irmse_weightednet_tr)
 
     # Print the final IRMSE results

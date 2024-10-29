@@ -11,8 +11,8 @@ import argparse
 from scipy.spatial.distance import pdist, squareform
 import osqp
 from scipy import sparse
-from scipy.stats import gaussian_kde
-from models.dynamic_net import Vcnet, TR, Drnet, Weightednet
+
+from models.dynamic_net import Vcnet, TR, Drnet
 from utils.eval import curve
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -21,10 +21,9 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 class Dataset_from_matrix(Dataset):
     """Dataset created from a tensor data_matrix."""
 
-    def __init__(self, data_matrix, weights=None):
+    def __init__(self, data_matrix):
         self.data_matrix = data_matrix
         self.num_data = data_matrix.shape[0]
-        self.weights = weights
 
     def __len__(self):
         return self.num_data
@@ -33,15 +32,11 @@ class Dataset_from_matrix(Dataset):
         if torch.is_tensor(idx):
             idx = idx.tolist()
         sample = self.data_matrix[idx, :]
-        if self.weights is not None:
-            weight = self.weights[idx]
-            return (sample[0:-1], sample[-1], weight)
-        else:
-            return (sample[0:-1], sample[-1])
+        return (sample[0:-1], sample[-1])
 
 
-def get_iter(data_matrix, batch_size, shuffle=True, weights=None):
-    dataset = Dataset_from_matrix(data_matrix, weights=weights)
+def get_iter(data_matrix, batch_size, shuffle=True):
+    dataset = Dataset_from_matrix(data_matrix)
     iterator = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
     return iterator
 
@@ -63,7 +58,7 @@ def adjust_learning_rate(optimizer, init_lr, epoch, lr_type='fixed', num_epoch=8
 
 
 def save_checkpoint(state, checkpoint_dir='.'):
-    filename = os.path.join(checkpoint_dir, state['model'] + '_ckpt.pth.tar')
+    filename = os.path.join(checkpoint_dir, model_name + '_ckpt.pth.tar')
     print('=> Saving checkpoint to {}'.format(filename))
     torch.save(state, filename)
 
@@ -80,19 +75,17 @@ def criterion_weighted(out, y, weight):
     return ((out[1].squeeze() - y.squeeze()) ** 2 * weight).mean()
 
 
-def weighted_TR(out, trg, y, weight,  beta=1., epsilon=1e-5):
-    return ((y.squeeze() - trg.squeeze() * weight - out[1].squeeze()) ** 2 * weight).mean()
-
-
 # def weighted_TR(out, trg, y, weight, beta=1., epsilon=1e-5):
 #     return ((y.squeeze() - trg.squeeze() * weight - out[1].squeeze()) ** 2*weight).mean()
+def weighted_TR(out, trg, y, weight, beta=1., epsilon=1e-5):
+    return beta * ((y.squeeze() - trg.squeeze() * weight - out[1].squeeze()) ** 2).mean()
 
 
 def independence_weights(A, X, lambda_=0, decorrelate_moments=False, preserve_means=False, dimension_adj=True):
     n = A.shape[0]
     p = X.shape[1]
     gamma = 1
-    # dif
+
     A = np.asarray(A).reshape(-1, 1)
     Adist = squareform(pdist(A, 'euclidean'))
     Xdist = squareform(pdist(X, 'euclidean'))
@@ -119,11 +112,15 @@ def independence_weights(A, X, lambda_=0, decorrelate_moments=False, preserve_me
     # quadratic term for weighted total distance covariance
     P = XA * AA / n ** 2
 
+    # Add a small regularization term to ensure convexity
+    reg_term = 1e-6 * np.eye(n)
+    P = P + reg_term
+
     if preserve_means:
         if decorrelate_moments:
             Constr_mat = (A - np.mean(A)) * (X - np.mean(X, axis=0))
-            Amat = sparse.vstack([np.eye(n), np.ones((1, n)), X.T,
-                                  A.reshape(1, -1), Constr_mat.T])
+            Amat = sparse.vstack(
+                [np.eye(n), np.ones((1, n)), X.T, A.reshape(1, -1), Constr_mat.T])
             lvec = np.concatenate([np.zeros(n), [n], np.mean(
                 X, axis=0), [np.mean(A)], np.zeros(X.shape[1])])
             uvec = np.concatenate(
@@ -148,28 +145,35 @@ def independence_weights(A, X, lambda_=0, decorrelate_moments=False, preserve_me
             uvec = np.concatenate([np.inf * np.ones(n), [n]])
 
     if dimension_adj:
-        Q_energy_A_adj = 1 / np.sqrt(p)
+        # Prevent divide by zero
+        Q_energy_A_adj = 1 / np.sqrt(p) if p > 0 else 1
         Q_energy_X_adj = 1
         sum_adj = Q_energy_A_adj + Q_energy_X_adj
-        Q_energy_A_adj /= sum_adj
-        Q_energy_X_adj /= sum_adj
+        if sum_adj > 0:  # Prevent invalid value encountered in division
+            Q_energy_A_adj /= sum_adj
+            Q_energy_X_adj /= sum_adj
     else:
         Q_energy_A_adj = Q_energy_X_adj = 1 / 2
 
     for na in range(1, 50):
-        p = sparse.csr_matrix(2 * (P + gamma * (Q_energy_A * Q_energy_A_adj + Q_energy_X *
-                                                Q_energy_X_adj) + lambda_ * np.diag(np.ones(n)) / n ** 2))
-        A = Amat
+        P_matrix = sparse.csr_matrix(2 * (P + gamma * (Q_energy_A * Q_energy_A_adj +
+                                                       Q_energy_X * Q_energy_X_adj) + lambda_ * np.diag(np.ones(n)) / n ** 2))
+        A_matrix = Amat
 
         l = lvec
         u = uvec
-        q = 2 * gamma * (aa_energy_A * Q_energy_A_adj +
-                         aa_energy_X * Q_energy_X_adj)
-        m = osqp.OSQP()
-        m.setup(P=p, q=q, A=A, l=l, u=u, max_iter=int(2e5),
-                eps_abs=1e-8, eps_rel=1e-8, verbose=False)
-        results = m.solve()
-        if not np.any(results.x > 1e5):
+        q_vector = 2 * gamma * \
+            (aa_energy_A * Q_energy_A_adj + aa_energy_X * Q_energy_X_adj)
+
+        osqp_solver = osqp.OSQP()
+
+        # Removed the 'polishing' argument
+        osqp_solver.setup(P=P_matrix, q=q_vector, A=A_matrix, l=l, u=u, max_iter=int(
+            2e5), eps_abs=1e-8, eps_rel=1e-8, verbose=False)
+
+        results = osqp_solver.solve()
+
+        if not np.any(results.x > 1e5):  # Exit early if solution looks good
             break
 
     weights = results.x
@@ -178,12 +182,10 @@ def independence_weights(A, X, lambda_=0, decorrelate_moments=False, preserve_me
 
     QM_unpen = P + gamma * (Q_energy_A * Q_energy_A_adj +
                             Q_energy_X * Q_energy_X_adj)
-
     quadpart_unpen = weights.T @ QM_unpen @ weights
     quadpart_unweighted = np.sum(QM_unpen)
 
     quadpart = quadpart_unpen + np.sum(weights ** 2) * lambda_ / n ** 2
-
     qvec = 2 * gamma * (aa_energy_A * Q_energy_A_adj +
                         aa_energy_X * Q_energy_X_adj)
     linpart = weights @ qvec
@@ -191,7 +193,6 @@ def independence_weights(A, X, lambda_=0, decorrelate_moments=False, preserve_me
 
     objective_history = quadpart + linpart + gamma * \
         (-mean_Xdist * Q_energy_X_adj - mean_Adist * Q_energy_A_adj)
-
     D_w = quadpart_unpen + linpart + gamma * \
         (-mean_Xdist * Q_energy_X_adj - mean_Adist * Q_energy_A_adj)
     D_unweighted = quadpart_unweighted + linpart_unweighted + gamma * \
@@ -275,7 +276,7 @@ if __name__ == "__main__":
                         default='dataset/news', help='dir of data matrix')
     parser.add_argument('--save_dir', type=str,
                         default='logs/news/eval', help='dir to save result')
-    parser.add_argument('--n_epochs', type=int, default=400,  # Adjusted to 800
+    parser.add_argument('--n_epochs', type=int, default=600,  # Adjusted to 800
                         help='num of epochs to train')
     parser.add_argument('--verbose', type=int, default=100,
                         help='print train info freq')
@@ -295,7 +296,10 @@ if __name__ == "__main__":
 
     data_matrix = pd.read_csv(os.path.join(
         args.data_dir, 'data_matrix.csv')).values
-
+    t = data_matrix[:, 0]  # 第一列为 t
+    y = data_matrix[:, -1]  # 最后一列为 y
+    x_100 = data_matrix[:, 1:101]
+    data_matrix = np.column_stack((t, x_100, y))
     t_grid_all = pd.read_csv(os.path.join(args.data_dir, 't_grid.csv')).values
 
     sample_sizes = range(1000, 2001, 1000)
@@ -342,7 +346,7 @@ if __name__ == "__main__":
             models = ['weightednet_TR']
             for model_name in models:
                 if model_name == 'Vcnet' or model_name == 'Vcnet_TR':
-                    cfg_density = [(498, 50, 1, 'relu'), (50, 50, 1, 'relu')]
+                    cfg_density = [(100, 50, 1, 'relu'), (50, 50, 1, 'relu')]
                     num_grid = 10
                     cfg = [(50, 50, 1, 'relu'), (50, 1, 1, 'id')]
                     degree = 2
@@ -352,7 +356,7 @@ if __name__ == "__main__":
                     model._initialize_weights()
 
                 elif model_name == 'Drnet_tr':
-                    cfg_density = [(498, 50, 1, 'relu'), (50, 50, 1, 'relu')]
+                    cfg_density = [(100, 50, 1, 'relu'), (50, 50, 1, 'relu')]
                     num_grid = 10
                     cfg = [(50, 50, 1, 'relu'), (50, 1, 1, 'id')]
                     isenhance = 1
@@ -362,15 +366,18 @@ if __name__ == "__main__":
                     model._initialize_weights()
 
                 elif model_name == 'weightednet' or model_name == 'weightednet_TR':
-                    cfg_density = [(498, 50, 1, 'relu'), (50, 50, 1, 'relu')]
-                    num_grid = 10
-                    cfg = [(50, 50, 1, 'relu'), (50, 1, 1, 'id')]
+                    cfg_density = [(100, 25, 1, 'relu'), (25, 25, 1, 'relu')]
+                    num_grid = 12
+                    cfg = [(25, 25, 1, 'relu'), (25, 1, 1, 'id')]
                     degree = 2
-                    knots = [0.33, 0.66]
-                    model = Weightednet(
-                        cfg_density, num_grid, cfg, degree, knots)
+                    knots = [0.4, 0.6]
+                    model = Vcnet(cfg_density, num_grid, cfg, degree, knots)
                     model = model.to(device)
                     model._initialize_weights()
+                    weights_info = independence_weights(
+                        train_matrix[:, 0].numpy(), train_matrix[:, 1:-399].numpy())
+                    weights = torch.tensor(
+                        weights_info['weights'], dtype=torch.float32)
 
                 isTargetReg = model_name in [
                     'Vcnet_TR', 'Drnet_tr', 'weightednet_TR']
@@ -403,77 +410,48 @@ if __name__ == "__main__":
                 ), lr=init_lr, momentum=momentum, weight_decay=wd, nesterov=True)
 
                 if isTargetReg:
-                    tr_optimizer = torch.optim.Adam(
+                    tr_optimizer = torch.optim.SGD(
                         TargetReg.parameters(), lr=tr_init_lr, weight_decay=tr_wd)
-                # 初始化weights为1
-                weights = torch.ones(
-                    train_loader.batch_size, dtype=torch.float32).to(device)
 
                 for epoch in range(num_epoch):
-                    hidden_outputs_matrix = None  # 用于累计所有样本的hidden_outputs
-                    all_t = []  # 用于保存所有的t
-
                     for inputs, y in train_loader:
-                        t = inputs[:, 0]  # 取出t
-                        x = inputs[:, 1:]  # 取出x
-
-                        optimizer.zero_grad()
-
-                        # 前向传播，获取g, Q和hidden_outputs
-                        out = model.forward(t, x)
-                        # 解构出 g, Q, hidden_outputs
-                        g, Q, hidden_outputs = out[0], out[1], out[2]
-
-                        # 将当前batch的hidden_outputs累加到矩阵中
-                        # 获取最后一层的输出
-                        hidden_outputs_batch = hidden_outputs[-1].detach()
-
-                        if hidden_outputs_matrix is None:
-                            hidden_outputs_matrix = hidden_outputs_batch
-                        else:
-                            hidden_outputs_matrix = torch.cat(
-                                (hidden_outputs_matrix, hidden_outputs_batch), dim=0)
-
-                        all_t.append(t)
-
-                        if model_name == 'weightednet' or model_name == 'weightednet_TR':
-                            # 不在每次都更新weights，保存所有y训练后的hidden
-                            pass
+                        t = inputs[:, 0]
+                        x = inputs[:, 1:]
 
                         if isTargetReg:
+                            optimizer.zero_grad()
+                            out = model.forward(t, x)
                             trg = TargetReg(t)
                             if model_name == 'weightednet_TR':
-                                # 计算 weightednet_TR 的 loss，直接使用 out
                                 loss = weighted_TR(out, trg, y, weights)
                             else:
-                                # 通常计算使用 g, Q 和 trg 的 loss
                                 loss = criterion(
                                     out, y, alpha=alpha) + criterion_TR(out, trg, y, beta=beta)
+                            loss.backward()
+                            optimizer.step()
+
+                            tr_optimizer.zero_grad()
+                            out = model.forward(t, x)
+                            trg = TargetReg(t)
+                            if model_name == 'weightednet_TR':
+                                tr_loss = weighted_TR(out, trg, y, weights)
+                            else:
+                                tr_loss = criterion_TR(out, trg, y, beta=beta)
+                            tr_loss.backward()
+                            tr_optimizer.step()
+
                         elif model_name == 'weightednet':
-                            # weightednet 使用加权 loss，直接使用 out
+                            optimizer.zero_grad()
+                            out = model.forward(t, x)
                             loss = criterion_weighted(out, y, weights)
+                            loss.backward()
+                            optimizer.step()
                         else:
-                            # 默认的 loss 计算，直接使用 out
+                            optimizer.zero_grad()
+                            out = model.forward(t, x)
                             loss = criterion(out, y, alpha=alpha)
-
-                        # 反向传播和优化
-                        loss.backward()
-                        optimizer.step()
-
-                    if epoch % 10 == 0:
-                        # 当一个 epoch 所有y都训练完后，使用independence_weights函数更新weights
-                        if model_name == 'weightednet' or model_name == 'weightednet_TR':
-                            # 将所有t转为numpy，并将hidden_outputs_matrix累加矩阵用于independence_weights计算
-                            all_t_tensor = torch.cat(
-                                all_t).detach().cpu().numpy()  # 第一个值 t
-                            hidden_outputs_numpy = hidden_outputs_matrix.detach().cpu().numpy()  # 第二个值累积的矩阵
-
-                            # 利用independence_weights计算新的weights
-                            weights_info = independence_weights(
-                                all_t_tensor, hidden_outputs_numpy)
-
-                            weights = torch.tensor(
-                                weights_info['weights'], dtype=torch.float32).to(device)
+                            loss.backward()
+                            optimizer.step()
 
                     if epoch % verbose == 0:
                         print(

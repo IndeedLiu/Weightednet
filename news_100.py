@@ -1,3 +1,4 @@
+import nni
 import torch
 import math
 import numpy as np
@@ -12,7 +13,7 @@ from scipy.spatial.distance import pdist, squareform
 import osqp
 from scipy import sparse
 
-from models.dynamic_net import Vcnet, TR, Drnet
+from models.dynamic_net import Vcnet, TR, Drnet, Weightednet
 from utils.eval import curve
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -71,12 +72,14 @@ def criterion_TR(out, trg, y, beta=1., epsilon=1e-5):
     return beta * ((y.squeeze() - trg.squeeze() / (out[0].squeeze() + epsilon) - out[1].squeeze()) ** 2).mean()
 
 
-def criterion_weighted(out, y, weight):
-    return ((out[1].squeeze() - y.squeeze()) ** 2 * weight).mean()
+def criterion_weighted(out, y, weight, epsilon=1e-5):
+    return ((out[1].squeeze() - y.squeeze()) ** 2*weight).mean()
 
 
-def weighted_TR(out, trg, y, weight, beta=1., epsilon=1e-5):
-    return beta * ((y.squeeze() - trg.squeeze() * weight - out[1].squeeze()) ** 2).mean()
+# def weighted_TR(out, trg, y, weight, beta=1., epsilon=1e-5):
+#     return ((y.squeeze() - trg.squeeze() * weight - out[1].squeeze()) ** 2*weight).mean()
+def weighted_TR(out, trg, y, weight,  beta=1., epsilon=1e-5):
+    return ((y.squeeze() - trg.squeeze() * weight - out[1].squeeze()) ** 2 * weight).mean()
 
 
 def independence_weights(A, X, lambda_=0, decorrelate_moments=False, preserve_means=False, dimension_adj=True):
@@ -282,8 +285,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     seed = 10  # Adjusted seed
+
     torch.manual_seed(seed)
     np.random.seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
     lr_type = 'fixed'
     wd = 5e-3  # Adjusted weight decay
@@ -301,7 +307,7 @@ if __name__ == "__main__":
     t_grid_all = pd.read_csv(os.path.join(args.data_dir, 't_grid.csv')).values
 
     sample_sizes = range(1000, 2001, 1000)
-    num_iterations = 5
+    num_iterations = 2
     mse_vcnet = []
     mse_vcnet_tr = []
     mse_drnet_tr = []
@@ -321,6 +327,7 @@ if __name__ == "__main__":
 
             # 在前6000行的数据中生成随机数
             idx = list(range(2000))
+            random.seed(10+_)
             random.shuffle(idx)
 
             # 选择train_idx
@@ -335,20 +342,21 @@ if __name__ == "__main__":
 
             # 初始化两个loader
             train_loader = get_iter(
-                train_matrix, batch_size=len(train_matrix), shuffle=True)
+                train_matrix, batch_size=len(train_matrix), shuffle=False)
             test_loader = get_iter(
                 test_matrix, batch_size=len(test_matrix), shuffle=False)
 
             # models = ['Vcnet', 'Vcnet_TR', 'weightednet',
             #         'weightednet_TR', 'Drnet_tr']
-            models = ['weightednet_TR']
+            models = [
+                'weightednet']
             for model_name in models:
                 if model_name == 'Vcnet' or model_name == 'Vcnet_TR':
-                    cfg_density = [(100, 50, 1, 'relu'), (50, 50, 1, 'relu')]
-                    num_grid = 10
-                    cfg = [(50, 50, 1, 'relu'), (50, 1, 1, 'id')]
+                    cfg_density = [(100, 25, 1, 'relu'), (25, 25, 1, 'tanh')]
+                    num_grid = 12
+                    cfg = [(25, 25, 1, 'tanh'), (25, 1, 1, 'id')]
                     degree = 2
-                    knots = [0.33, 0.66]
+                    knots = [0.4, 0.6]
                     model = Vcnet(cfg_density, num_grid, cfg, degree, knots)
                     model = model.to(device)
                     model._initialize_weights()
@@ -364,18 +372,15 @@ if __name__ == "__main__":
                     model._initialize_weights()
 
                 elif model_name == 'weightednet' or model_name == 'weightednet_TR':
-                    cfg_density = [(100, 50, 1, 'relu'), (50, 50, 1, 'relu')]
-                    num_grid = 10
-                    cfg = [(50, 50, 1, 'relu'), (50, 1, 1, 'id')]
+                    cfg_density = [(100, 100, 1, 'relu'), (100, 25, 1, 'tanh')]
+                    num_grid = 12
+                    cfg = [(25, 25, 1, 'tanh'), (25, 1, 1, 'id')]
                     degree = 2
-                    knots = [0.33, 0.66]
-                    model = Vcnet(cfg_density, num_grid, cfg, degree, knots)
+                    knots = [0.4, 0.6]
+                    model = Weightednet(
+                        cfg_density, num_grid, cfg, degree, knots)
                     model = model.to(device)
                     model._initialize_weights()
-                    weights_info = independence_weights(
-                        train_matrix[:, 0].numpy(), train_matrix[:, 1:-399].numpy())
-                    weights = torch.tensor(
-                        weights_info['weights'], dtype=torch.float32)
 
                 isTargetReg = model_name in [
                     'Vcnet_TR', 'Drnet_tr', 'weightednet_TR']
@@ -408,49 +413,78 @@ if __name__ == "__main__":
                 ), lr=init_lr, momentum=momentum, weight_decay=wd, nesterov=True)
 
                 if isTargetReg:
-                    tr_optimizer = torch.optim.SGD(
+                    tr_optimizer = torch.optim.Adam(
                         TargetReg.parameters(), lr=tr_init_lr, weight_decay=tr_wd)
+                # 初始化weights为1
+                weights = torch.ones(
+                    train_loader.batch_size, dtype=torch.float32).to(device)
 
                 for epoch in range(num_epoch):
+                    hidden_outputs_matrix = None  # 用于累计所有样本的hidden_outputs
+                    all_t = []  # 用于保存所有的t
+
                     for inputs, y in train_loader:
-                        t = inputs[:, 0]
-                        x = inputs[:, 1:]
+                        t = inputs[:, 0]  # 取出t
+                        x = inputs[:, 1:]  # 取出x
+
+                        optimizer.zero_grad()
+
+                        # 前向传播，获取g, Q和hidden_outputs
+                        out = model.forward(t, x)
+                        # 解构出 g, Q, hidden_outputs
+                        if model_name == 'weightednet' or model_name == 'weightednet_TR':
+                            g, Q, hidden_outputs = out[0], out[1], out[2]
+
+                        # 将当前batch的hidden_outputs累加到矩阵中
+                        # 获取最后一层的输出
+                            hidden_outputs_batch = hidden_outputs[-1].detach()
+
+                            if hidden_outputs_matrix is None:
+                                hidden_outputs_matrix = hidden_outputs_batch
+                            else:
+                                hidden_outputs_matrix = torch.cat(
+                                    (hidden_outputs_matrix, hidden_outputs_batch), dim=0)
+
+                            all_t.append(t)
+
+                        if model_name == 'weightednet' or model_name == 'weightednet_TR':
+                            # 不在每次都更新weights，保存所有y训练后的hidden
+                            pass
 
                         if isTargetReg:
-                            optimizer.zero_grad()
-                            out = model.forward(t, x)
                             trg = TargetReg(t)
                             if model_name == 'weightednet_TR':
-                                loss = criterion_weighted(
-                                    out, y, weights) + weighted_TR(out, trg, y, weights)
+                                # 计算 weightednet_TR 的 loss，直接使用 out
+                                loss = weighted_TR(out, trg, y, weights)
                             else:
+                                # 通常计算使用 g, Q 和 trg 的 loss
                                 loss = criterion(
                                     out, y, alpha=alpha) + criterion_TR(out, trg, y, beta=beta)
-                            loss.backward()
-                            optimizer.step()
-
-                            tr_optimizer.zero_grad()
-                            out = model.forward(t, x)
-                            trg = TargetReg(t)
-                            if model_name == 'weightednet_TR':
-                                tr_loss = weighted_TR(out, trg, y, weights)
-                            else:
-                                tr_loss = criterion_TR(out, trg, y, beta=beta)
-                            tr_loss.backward()
-                            tr_optimizer.step()
-
                         elif model_name == 'weightednet':
-                            optimizer.zero_grad()
-                            out = model.forward(t, x)
+                            # weightednet 使用加权 loss，直接使用 out
                             loss = criterion_weighted(out, y, weights)
-                            loss.backward()
-                            optimizer.step()
                         else:
-                            optimizer.zero_grad()
-                            out = model.forward(t, x)
+                            # 默认的 loss 计算，直接使用 out
                             loss = criterion(out, y, alpha=alpha)
-                            loss.backward()
-                            optimizer.step()
+
+                        # 反向传播和优化
+                        loss.backward()
+                        optimizer.step()
+
+                    if epoch % 10 == 0:
+                        # 当一个 epoch 所有y都训练完后，使用independence_weights函数更新weights
+                        if model_name == 'weightednet' or model_name == 'weightednet_TR':
+                            # 将所有t转为numpy，并将hidden_outputs_matrix累加矩阵用于independence_weights计算
+                            all_t_tensor = torch.cat(
+                                all_t).detach().cpu().numpy()  # 第一个值 t
+                            hidden_outputs_numpy = hidden_outputs_matrix.detach().cpu().numpy()  # 第二个值累积的矩阵
+
+                            # 利用independence_weights计算新的weights
+                            weights_info = independence_weights(
+                                all_t_tensor, hidden_outputs_numpy)
+
+                            weights = torch.tensor(
+                                weights_info['weights'], dtype=torch.float32).to(device)
 
                     if epoch % verbose == 0:
                         print(
@@ -479,14 +513,14 @@ if __name__ == "__main__":
         # irmse_vcnet_tr = compute_irmse(mse_vcnet_tr_iter)
         # irmse_drnet_tr = compute_irmse(mse_drnet_tr_iter)
         irmse_weightednet = compute_irmse(mse_weightednet_iter)
-        irmse_weightednet_tr = compute_irmse(mse_weightednet_tr_iter)
+        # irmse_weightednet_tr = compute_irmse(mse_weightednet_tr_iter)
 
         # Append the final IRMSEs for each sample size
         # mse_vcnet.append(irmse_vcnet)
         # mse_vcnet_tr.append(irmse_vcnet_tr)
         # mse_drnet_tr.append(irmse_drnet_tr)
         mse_weightednet.append(irmse_weightednet)
-        mse_weightednet_tr.append(irmse_weightednet_tr)
+        # mse_weightednet_tr.append(irmse_weightednet_tr)
 
     # Print the final IRMSE results
     print("VCNet IRMSE:", mse_vcnet)
